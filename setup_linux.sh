@@ -87,28 +87,25 @@ install_ipsw() {
     echo "    installed: $(ipsw version)"
 }
 
-install_apfs_rw() {
-    # linux-apfs-rw: read-write APFS kernel module (iOS 12+ ramdisks use APFS)
-    if grep -q "^apfs" /proc/filesystems 2>/dev/null; then
-        echo "==> apfs module already loaded"
-        return
-    fi
-    if sudo modprobe apfs 2>/dev/null; then
-        echo "==> apfs kernel module loaded"
+install_apfs_fuse() {
+    if command -v apfs-fuse &>/dev/null; then
+        echo "==> apfs-fuse already installed"
         return
     fi
 
-    echo "==> Building linux-apfs-rw from source..."
+    echo "==> Building apfs-fuse from source..."
     local TMP_APFS
     TMP_APFS="$(mktemp -d)"
     trap 'rm -rf "${TMP_APFS}"' RETURN
 
-    git clone --depth=1 https://github.com/linux-apfs/linux-apfs-rw.git "${TMP_APFS}/apfs"
-    make -C "${TMP_APFS}/apfs" -j"$(nproc)"
-    sudo make -C "${TMP_APFS}/apfs" install
-    sudo depmod -a
-    sudo modprobe apfs
-    echo "    apfs module installed and loaded"
+    sudo apt-get install -y cmake libbz2-dev libattr1-dev >/dev/null 2>&1
+
+    git clone --depth=1 --recursive https://github.com/sgan81/apfs-fuse.git "${TMP_APFS}/apfs-fuse"
+    cmake -S "${TMP_APFS}/apfs-fuse" -B "${TMP_APFS}/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+    make -C "${TMP_APFS}/build" -j"$(nproc)"
+    sudo install -m755 "${TMP_APFS}/build/apfs-fuse" /usr/local/bin/apfs-fuse
+    sudo install -m755 "${TMP_APFS}/build/apfs-dump" /usr/local/bin/apfs-dump 2>/dev/null || true
+    echo "    installed: $(apfs-fuse --version 2>&1 | head -1 || echo ok)"
 }
 
 check_hfsplus_module() {
@@ -127,7 +124,7 @@ main() {
     install_apt_deps
     install_ldid
     install_ipsw
-    install_apfs_rw
+    install_apfs_fuse
     check_hfsplus_module
     echo ""
     echo "All dependencies installed."

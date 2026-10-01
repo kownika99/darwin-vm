@@ -181,9 +181,14 @@ _LX_HFS_LOOP=""
 _LX_HFS_MNT=""
 
 _linux_cleanup() {
-    [[ -n "${_LX_HFS_MNT}"  ]] && sudo umount  "${_LX_HFS_MNT}"  2>/dev/null || true
+    [[ -n "${_LX_HFS_MNT}"  ]] && sudo umount "${_LX_HFS_MNT}"  2>/dev/null || true
     [[ -n "${_LX_HFS_LOOP}" ]] && sudo losetup -d "${_LX_HFS_LOOP}" 2>/dev/null || true
-    [[ -n "${_LX_APFS_MNT}" ]] && sudo umount  "${_LX_APFS_MNT}" 2>/dev/null || true
+    # apfs-fuse is a FUSE mount — use fusermount to unmount, then detach loop
+    if [[ -n "${_LX_APFS_MNT}" ]]; then
+        fusermount -u "${_LX_APFS_MNT}" 2>/dev/null \
+            || fusermount3 -u "${_LX_APFS_MNT}" 2>/dev/null \
+            || sudo umount "${_LX_APFS_MNT}" 2>/dev/null || true
+    fi
     [[ -n "${_LX_APFS_LOOP}" ]] && sudo losetup -d "${_LX_APFS_LOOP}" 2>/dev/null || true
     [[ -n "${_LX_HFS_MNT}"  && -d "${_LX_HFS_MNT}"  ]] && rmdir "${_LX_HFS_MNT}"  2>/dev/null || true
     [[ -n "${_LX_APFS_MNT}" && -d "${_LX_APFS_MNT}" ]] && rmdir "${_LX_APFS_MNT}" 2>/dev/null || true
@@ -200,23 +205,29 @@ sys.exit(0 if magic == b'NXSB' else 1)
 }
 
 _linux_mount_apfs_ro() {
-    # Mount an APFS image read-only. Sets _LX_APFS_LOOP and _LX_APFS_MNT.
+    # Mount an APFS image read-only using apfs-fuse (userspace, better iOS compat).
+    # Sets _LX_APFS_LOOP and _LX_APFS_MNT.
     local img="${1}"
     _LX_APFS_MNT="$(mktemp -d)"
     _LX_APFS_LOOP="$(sudo losetup -f --show "${img}")"
 
-    if ! grep -q "^apfs" /proc/filesystems 2>/dev/null; then
-        sudo modprobe apfs 2>/dev/null \
-            || die "apfs kernel module not available — run ./setup_linux.sh first"
-    fi
-    # vol=0 selects the first (data) volume inside the APFS container.
-    # Without it, linux-apfs-rw mounts the container superblock, not the data.
-    if ! sudo mount -t apfs -o ro,vol=0 "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}"; then
+    if ! command -v apfs-fuse &>/dev/null; then
         sudo losetup -d "${_LX_APFS_LOOP}"; rmdir "${_LX_APFS_MNT}"
         _LX_APFS_LOOP=""; _LX_APFS_MNT=""
-        die "APFS read-only mount failed — run ./setup_linux.sh to install linux-apfs-rw"
+        die "apfs-fuse not found — run ./setup_linux.sh first"
     fi
-    echo "mounted APFS (read-only) on ${_LX_APFS_MNT}"
+
+    # apfs-fuse mounts as the current user; -o allow_other lets sudo-run copies see it.
+    # -v 0 selects the first (data) volume in the container.
+    if ! apfs-fuse -v 0 -o allow_other "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}" 2>/dev/null; then
+        # fallback: without -v (some versions don't accept -v)
+        if ! apfs-fuse -o allow_other "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}" 2>/dev/null; then
+            sudo losetup -d "${_LX_APFS_LOOP}"; rmdir "${_LX_APFS_MNT}"
+            _LX_APFS_LOOP=""; _LX_APFS_MNT=""
+            die "apfs-fuse mount failed — check dmesg or try: apfs-fuse ${_LX_APFS_LOOP} /tmp/test"
+        fi
+    fi
+    echo "mounted APFS (apfs-fuse) on ${_LX_APFS_MNT}"
 }
 
 _linux_create_hfs_image() {
@@ -372,8 +383,10 @@ _patch_ramdisk_linux() {
             sudo cp -a "${_LX_APFS_MNT}/." "${_LX_HFS_MNT}/" 2>/dev/null || true
         fi
 
-        # Unmount APFS — no longer needed
-        sudo umount "${_LX_APFS_MNT}" 2>/dev/null || true
+        # Unmount APFS (FUSE) — no longer needed
+        fusermount -u "${_LX_APFS_MNT}" 2>/dev/null \
+            || fusermount3 -u "${_LX_APFS_MNT}" 2>/dev/null \
+            || sudo umount "${_LX_APFS_MNT}" 2>/dev/null || true
         sudo losetup -d "${_LX_APFS_LOOP}" 2>/dev/null || true
         rmdir "${_LX_APFS_MNT}" 2>/dev/null || true
         _LX_APFS_MNT=""; _LX_APFS_LOOP=""
