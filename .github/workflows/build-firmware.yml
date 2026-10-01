@@ -2,15 +2,6 @@ name: Build Darwin-VM Firmware
 
 on:
   workflow_dispatch:
-    inputs:
-      devname:
-        description: 'Device name (e.g. iPhone14,2)'
-        required: true
-        default: 'iPhone14,2'
-      ios_version:
-        description: 'iOS version (e.g. 26.6.1)'
-        required: true
-        default: '26.6.1'
 
 jobs:
   build:
@@ -30,48 +21,36 @@ jobs:
           sudo install -m755 /tmp/ipsw /usr/local/bin/ipsw
           ipsw version
 
-      - name: Download iOS sysroot (prebuilt)
+      - name: Download iOS sysroot
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/jprx/ios-cli-tools/main/prebuilt.tar.gz" \
+          curl -fsSL \
+            "https://raw.githubusercontent.com/jprx/ios-cli-tools/main/prebuilt.tar.gz" \
             -o ios_sysroot.tar.gz
-          echo "sysroot size: $(du -sh ios_sysroot.tar.gz)"
 
-      - name: Find IPSW URL
+      - name: Find IPSW URL for iPhone14,2 iOS 26.6.1
         run: |
-          URL=$(ipsw download ipsw \
-            --device "${{ inputs.devname }}" \
-            --version "${{ inputs.ios_version }}" \
-            --urls 2>/dev/null | grep "https://" | head -1 | tr -d ' ' || true)
-          if [[ -z "$URL" ]]; then
-            # fallback: query ipsw.me API
-            URL=$(curl -s "https://api.ipsw.me/v4/device/${{ inputs.devname }}?type=ipsw" \
-              | python3 -c "
+          URL=$(curl -s "https://api.ipsw.me/v4/device/iPhone14,2?type=ipsw" \
+            | python3 -c "
 import json,sys
 data=json.load(sys.stdin)
 for fw in data.get('firmwares',[]):
-    if fw.get('version','').startswith('${{ inputs.ios_version }}'):
+    v=fw.get('version','')
+    if v.startswith('26.6'):
         print(fw['url']); break
 " 2>/dev/null || true)
-          fi
-          if [[ -z "$URL" ]]; then
-            echo "ERROR: could not find IPSW URL for ${{ inputs.devname }} ${{ inputs.ios_version }}"
-            exit 1
-          fi
-          echo "Found URL: $URL"
           echo "IPSW_URL=${URL}" >> $GITHUB_ENV
+          echo "Found: ${URL}"
 
       - name: Build firmware
-        run: |
-          DEVNAME="${{ inputs.devname }}" URL="${IPSW_URL}" ./get_files.sh
+        run: DEVNAME="iPhone14,2" URL="${IPSW_URL}" ./get_files.sh
 
       - name: Fix permissions
-        run: |
-          echo y | ./fix_perms.sh firmware/ramdisk.dmg
+        run: echo y | ./fix_perms.sh firmware/ramdisk.dmg
 
-      - name: Upload firmware artifacts
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: darwin-vm-firmware-${{ inputs.devname }}-ios${{ inputs.ios_version }}
+          name: darwin-vm-firmware-iPhone14-2-ios26
           path: |
             firmware/bootkc
             firmware/dtree
