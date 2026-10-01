@@ -24,7 +24,12 @@ jobs:
       - name: Install dependencies
         run: |
           brew install jq
-          brew install blacktop/tap/ipsw
+          # Install ipsw directly from GitHub releases to avoid untrusted tap issues
+          IPSW_VER="v3.1.729"
+          curl -fsSL "https://github.com/blacktop/ipsw/releases/download/${IPSW_VER}/ipsw_${IPSW_VER#v}_macOS_arm64.tar.gz" -o /tmp/ipsw.tar.gz
+          tar -xzf /tmp/ipsw.tar.gz -C /tmp
+          sudo install -m755 /tmp/ipsw /usr/local/bin/ipsw
+          ipsw version
 
       - name: Find IPSW URL (if not provided)
         if: ${{ inputs.ipsw_url == '' }}
