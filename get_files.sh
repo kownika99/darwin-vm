@@ -218,12 +218,15 @@ _linux_mount_apfs_ro() {
 }
 
 _linux_create_hfs_image() {
-    # Create a new HFS+ image of the same size as $1, mounted at _LX_HFS_MNT.
+    # Create a new HFS+ image at 2x the APFS container size (APFS has different
+    # overhead; 2x gives room for content + ios_sysroot extraction).
     local orig="${1}" new_img="${2}"
-    local size_bytes
+    local size_bytes hfs_size
 
     size_bytes="$(stat -c %s "${orig}")"
-    dd if=/dev/zero of="${new_img}" bs=1 count=0 seek="${size_bytes}" 2>/dev/null
+    hfs_size=$(( size_bytes * 2 ))
+
+    dd if=/dev/zero of="${new_img}" bs=1 count=0 seek="${hfs_size}" 2>/dev/null
 
     if ! command -v mkfs.hfsplus &>/dev/null; then
         die "mkfs.hfsplus not found — install hfsprogs: apt install hfsprogs"
@@ -237,7 +240,7 @@ _linux_create_hfs_image() {
         _LX_HFS_LOOP=""; _LX_HFS_MNT=""
         die "HFS+ mount failed on new image"
     fi
-    echo "created HFS+ ramdisk (${size_bytes} bytes) on ${_LX_HFS_MNT}"
+    echo "created HFS+ ramdisk (${hfs_size} bytes) on ${_LX_HFS_MNT}"
 }
 
 _linux_mount_hfs_rw() {
@@ -358,8 +361,14 @@ _patch_ramdisk_linux() {
         _linux_mount_apfs_ro "${ramdisk}"
         _linux_create_hfs_image "${ramdisk}" "${new_ramdisk}"
 
-        echo "Copying APFS content to HFS+ image..."
-        sudo cp -a "${_LX_APFS_MNT}/." "${_LX_HFS_MNT}/"
+        echo "Copying APFS content to HFS+ image (this may take a moment)..."
+        # rsync handles APFS special files more gracefully than cp -a;
+        # --ignore-errors skips files that HFS+ can't represent (xattrs, etc.)
+        if command -v rsync &>/dev/null; then
+            sudo rsync -aHX --ignore-errors "${_LX_APFS_MNT}/" "${_LX_HFS_MNT}/" 2>/dev/null || true
+        else
+            sudo cp -a "${_LX_APFS_MNT}/." "${_LX_HFS_MNT}/" 2>/dev/null || true
+        fi
 
         # Unmount APFS — no longer needed
         sudo umount "${_LX_APFS_MNT}" 2>/dev/null || true

@@ -14,6 +14,7 @@ install_apt_deps() {
     sudo apt-get install -y \
         jq \
         hfsprogs \
+        rsync \
         python3 \
         kmod \
         git \
