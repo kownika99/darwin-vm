@@ -3,7 +3,7 @@
 # Run this once before running get_files.sh.
 set -euo pipefail
 
-IPSW_VERSION="v0.65.0"  # update as needed: https://github.com/blacktop/ipsw/releases
+IPSW_VERSION="v3.1.729"  # update as needed: https://github.com/blacktop/ipsw/releases
 ARCH="$(uname -m)"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -56,7 +56,7 @@ install_ipsw() {
     echo "==> Installing ipsw ${IPSW_VERSION}..."
 
     case "${ARCH}" in
-        x86_64)  IPSW_ARCH="amd64" ;;
+        x86_64)  IPSW_ARCH="x86_64" ;;
         aarch64) IPSW_ARCH="arm64" ;;
         *) die "unsupported architecture: ${ARCH}" ;;
     esac
