@@ -16,12 +16,21 @@ install_apt_deps() {
         hfsprogs \
         rsync \
         python3 \
+        python3-pip \
+        python3-sphinx \
+        python3-sphinx-rtd-theme \
         kmod \
         git \
         make \
+        ninja-build \
+        meson \
+        pkg-config \
         libplist-dev \
         libssl-dev \
-        pkg-config \
+        libglib2.0-dev \
+        libpixman-1-dev \
+        libfdt-dev \
+        libslirp-dev \
         linux-headers-"$(uname -r)" \
         build-essential \
         fuse3 \
