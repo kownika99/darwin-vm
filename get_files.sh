@@ -14,6 +14,7 @@ IOS_SYSROOT_TARFILE="ios_sysroot.tar.gz"
 ADT_FIXUP="./dt_fixup.py"
 NVRAM_BIN="nvram.bin"
 BUILD_TC="./build_tc.py"
+GET_CDHASH="./get_cdhash.py"
 
 FW_DIR="firmware"
 
@@ -28,13 +29,40 @@ die() {
     exit 1
 }
 
+is_linux() {
+    [[ "$(uname)" == "Linux" ]]
+}
+
 ensure_installed() {
     if [[ ! -x $(command -v "jq") ]]; then
-        die "missing jq command (brew install jq)"
+        if is_linux; then
+            die "missing jq (apt install jq)"
+        else
+            die "missing jq command (brew install jq)"
+        fi
     fi
 
     if [[ ! -x $(command -v "ipsw") ]]; then
-        die "missing ipsw command (brew install ipsw)"
+        if is_linux; then
+            die "missing ipsw command — download from https://github.com/blacktop/ipsw/releases and place in PATH"
+        else
+            die "missing ipsw command (brew install ipsw)"
+        fi
+    fi
+
+    if is_linux; then
+        if [[ ! -x $(command -v "ldid") ]]; then
+            die "missing ldid (apt install ldid  OR  see https://github.com/ProcursusTeam/ldid)"
+        fi
+        if ! sudo -n true 2>/dev/null; then
+            echo "Linux ramdisk patching requires sudo for HFS+ mounting."
+            echo "You will be prompted for your password."
+        fi
+        # Verify HFS+ write support (hfsprogs provides fsck.hfsplus and enables rw mounts)
+        if ! grep -q hfsplus /proc/filesystems 2>/dev/null; then
+            warn "hfsplus not in /proc/filesystems — trying to load module..."
+            sudo modprobe hfsplus 2>/dev/null || warn "could not load hfsplus module; mount may fail"
+        fi
     fi
 }
 
@@ -144,14 +172,61 @@ get_ramdisk() {
     # get_file "${trustcache_name}" "ramdisk.tc"
 }
 
+# ── Linux-specific ramdisk helpers ──────────────────────────────────────────
+
+_linux_mount_hfs() {
+    local img="${1}" mnt="${2}"
+    local loopdev
+
+    loopdev="$(sudo losetup -f --show "${img}")"
+    echo "${loopdev}"  # caller captures this
+
+    if ! sudo mount -t hfsplus -o rw,force "${loopdev}" "${mnt}"; then
+        sudo losetup -d "${loopdev}" 2>/dev/null || true
+        rmdir "${mnt}" 2>/dev/null || true
+        die "HFS+ mount failed — install hfsprogs: apt install hfsprogs"
+    fi
+}
+
+_linux_umount_hfs() {
+    local mnt="${1}" loopdev="${2}"
+    sudo umount "${mnt}"  2>/dev/null || true
+    sudo losetup -d "${loopdev}" 2>/dev/null || true
+    rmdir "${mnt}"         2>/dev/null || true
+}
+
+_linux_codesign_dir() {
+    # Ad-hoc sign every executable under $1 using ldid.
+    # ldid -S signs with null entitlements (equivalent to codesign -s -)
+    local dir="${1}"
+    sudo find "${dir}" -type f -perm /111 -exec sudo ldid -S {} \; 2>/dev/null || true
+}
+
+_linux_collect_hashes() {
+    # Walk $1 and print one CDHash per line for every signed executable.
+    # Uses get_cdhash.py (pure Python Mach-O parser, no codesign needed).
+    local dir="${1}"
+    sudo find "${dir}" -type f -perm /111 | while IFS= read -r f; do
+        python3 "${GET_CDHASH}" "${f}" 2>/dev/null || true
+    done
+}
+
+# ── Platform-aware ramdisk patching ─────────────────────────────────────────
+
 patch_ramdisk() {
     local ramdisk
     ramdisk="${FW_DIR}/ramdisk.dmg"
 
-    if [[ "$(uname)" != "Darwin" ]]; then
-        echo "This isn't a Mac, so we can't patch the ramdisk- stopping here"
-        exit 0
+    if is_linux; then
+        _patch_ramdisk_linux "${ramdisk}"
+    else
+        _patch_ramdisk_darwin "${ramdisk}"
     fi
+}
+
+_patch_ramdisk_darwin() {
+    local ramdisk="${1}"
+    local livemount loopdev
 
     echo "Patching ${ramdisk}"
 
@@ -207,6 +282,52 @@ patch_ramdisk() {
         \( -exec codesign -a arm64e.x1 -d -vvv {} \; -o -true \) \
         2>&1 | grep -i cdhash= | cut -d= -f2- > "${FW_DIR}/all_hashes"
 
+    "${BUILD_TC}" "${FW_DIR}/all_hashes" "${FW_DIR}/ramdisk.tc"
+}
+
+_patch_ramdisk_linux() {
+    local ramdisk="${1}"
+    local livemount loopdev
+
+    echo "Patching ${ramdisk} (Linux)"
+
+    livemount="$(mktemp -d)"
+    loopdev="$(_linux_mount_hfs "${ramdisk}" "${livemount}")"
+    trap '_linux_umount_hfs "${livemount}" "${loopdev}"' EXIT
+
+    echo "mounted ${ramdisk} on ${livemount}"
+
+    if [[ -d "${livemount}/System/Library/LaunchDaemons.old" ]]; then
+        echo "already patched"
+        return
+    fi
+
+    sudo mv "${livemount}/System/Library/LaunchDaemons" \
+            "${livemount}/System/Library/LaunchDaemons.old"
+    sudo mkdir "${livemount}/System/Library/LaunchDaemons"
+    sudo cp "${SHELL_LAUNCHD_PLIST}" "${livemount}/System/Library/LaunchDaemons"
+
+    case "${SYS_SDK}" in
+        'iphoneos')
+            if [[ ! -f "${IOS_SYSROOT_TARFILE}" ]]; then
+                echo "couldn't find the iOS sysroot"
+                exit 1
+            fi
+
+            echo "extracting iOS sysroot..."
+            sudo tar xf "${IOS_SYSROOT_TARFILE}" --directory "${livemount}" --strip-components 1
+            echo "signing binaries with ldid..."
+            _linux_codesign_dir "${livemount}/bin"
+            ;;
+        'macosx')
+            ;;
+        *)
+            die "unknown SDK (${SYS_SDK})"
+            ;;
+    esac
+
+    echo "building trustcache..."
+    _linux_collect_hashes "${livemount}" | sort -u > "${FW_DIR}/all_hashes"
     "${BUILD_TC}" "${FW_DIR}/all_hashes" "${FW_DIR}/ramdisk.tc"
 }
 
