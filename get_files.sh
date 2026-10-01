@@ -174,70 +174,91 @@ get_ramdisk() {
 
 # ── Linux-specific ramdisk helpers ──────────────────────────────────────────
 
-# Returns "apfs" or "hfsplus" based on the magic bytes in the image.
-_detect_fs_type() {
-    local img="${1}"
-    # APFS container superblock has magic "NXSB" at offset 0x20
-    if python3 -c "
+# Script-level cleanup state (avoids local-variable scope issues with EXIT trap)
+_LX_APFS_LOOP=""
+_LX_APFS_MNT=""
+_LX_HFS_LOOP=""
+_LX_HFS_MNT=""
+
+_linux_cleanup() {
+    [[ -n "${_LX_HFS_MNT}"  ]] && sudo umount  "${_LX_HFS_MNT}"  2>/dev/null || true
+    [[ -n "${_LX_HFS_LOOP}" ]] && sudo losetup -d "${_LX_HFS_LOOP}" 2>/dev/null || true
+    [[ -n "${_LX_APFS_MNT}" ]] && sudo umount  "${_LX_APFS_MNT}" 2>/dev/null || true
+    [[ -n "${_LX_APFS_LOOP}" ]] && sudo losetup -d "${_LX_APFS_LOOP}" 2>/dev/null || true
+    [[ -n "${_LX_HFS_MNT}"  && -d "${_LX_HFS_MNT}"  ]] && rmdir "${_LX_HFS_MNT}"  2>/dev/null || true
+    [[ -n "${_LX_APFS_MNT}" && -d "${_LX_APFS_MNT}" ]] && rmdir "${_LX_APFS_MNT}" 2>/dev/null || true
+}
+
+_detect_apfs() {
+    # Returns 0 (true) if the image is an APFS container (NXSB magic at 0x20)
+    python3 -c "
 import sys
-with open('${img}','rb') as f:
+with open('${1}','rb') as f:
     f.seek(0x20); magic=f.read(4)
 sys.exit(0 if magic == b'NXSB' else 1)
-" 2>/dev/null; then
-        echo "apfs"
-    else
-        echo "hfsplus"
+" 2>/dev/null
+}
+
+_linux_mount_apfs_ro() {
+    # Mount an APFS image read-only. Sets _LX_APFS_LOOP and _LX_APFS_MNT.
+    local img="${1}"
+    _LX_APFS_MNT="$(mktemp -d)"
+    _LX_APFS_LOOP="$(sudo losetup -f --show "${img}")"
+
+    if ! grep -q "^apfs" /proc/filesystems 2>/dev/null; then
+        sudo modprobe apfs 2>/dev/null \
+            || die "apfs kernel module not available — run ./setup_linux.sh first"
     fi
+    if ! sudo mount -t apfs -o ro "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}"; then
+        sudo losetup -d "${_LX_APFS_LOOP}"; rmdir "${_LX_APFS_MNT}"
+        _LX_APFS_LOOP=""; _LX_APFS_MNT=""
+        die "APFS read-only mount failed — run ./setup_linux.sh to install linux-apfs-rw"
+    fi
+    echo "mounted APFS (read-only) on ${_LX_APFS_MNT}"
 }
 
-_linux_mount_dmg() {
-    local img="${1}" mnt="${2}"
-    local loopdev fstype
+_linux_create_hfs_image() {
+    # Create a new HFS+ image of the same size as $1, mounted at _LX_HFS_MNT.
+    local orig="${1}" new_img="${2}"
+    local size_bytes
 
-    loopdev="$(sudo losetup -f --show "${img}")"
-    echo "${loopdev}"  # caller captures this
+    size_bytes="$(stat -c %s "${orig}")"
+    dd if=/dev/zero of="${new_img}" bs=1 count=0 seek="${size_bytes}" 2>/dev/null
 
-    fstype="$(_detect_fs_type "${img}")"
+    if ! command -v mkfs.hfsplus &>/dev/null; then
+        die "mkfs.hfsplus not found — install hfsprogs: apt install hfsprogs"
+    fi
+    sudo mkfs.hfsplus -v "RamDisk" "${new_img}" >/dev/null
 
-    case "${fstype}" in
-        apfs)
-            if ! grep -q "^apfs" /proc/filesystems 2>/dev/null; then
-                sudo modprobe apfs 2>/dev/null \
-                    || die "apfs kernel module not available — run ./setup_linux.sh first"
-            fi
-            if ! sudo mount -t apfs -o rw "${loopdev}" "${mnt}"; then
-                sudo losetup -d "${loopdev}" 2>/dev/null || true
-                rmdir "${mnt}" 2>/dev/null || true
-                die "APFS mount failed — run ./setup_linux.sh to install linux-apfs-rw"
-            fi
-            ;;
-        hfsplus)
-            if ! sudo mount -t hfsplus -o rw,force "${loopdev}" "${mnt}"; then
-                sudo losetup -d "${loopdev}" 2>/dev/null || true
-                rmdir "${mnt}" 2>/dev/null || true
-                die "HFS+ mount failed — install hfsprogs: apt install hfsprogs"
-            fi
-            ;;
-    esac
+    _LX_HFS_MNT="$(mktemp -d)"
+    _LX_HFS_LOOP="$(sudo losetup -f --show "${new_img}")"
+    if ! sudo mount -t hfsplus -o rw,force "${_LX_HFS_LOOP}" "${_LX_HFS_MNT}"; then
+        sudo losetup -d "${_LX_HFS_LOOP}"; rmdir "${_LX_HFS_MNT}"
+        _LX_HFS_LOOP=""; _LX_HFS_MNT=""
+        die "HFS+ mount failed on new image"
+    fi
+    echo "created HFS+ ramdisk (${size_bytes} bytes) on ${_LX_HFS_MNT}"
 }
 
-_linux_umount_dmg() {
-    local mnt="${1}" loopdev="${2}"
-    sudo umount "${mnt}"  2>/dev/null || true
-    sudo losetup -d "${loopdev}" 2>/dev/null || true
-    rmdir "${mnt}"         2>/dev/null || true
+_linux_mount_hfs_rw() {
+    # Mount an existing HFS+ image read-write. Sets _LX_HFS_LOOP and _LX_HFS_MNT.
+    local img="${1}"
+    _LX_HFS_MNT="$(mktemp -d)"
+    _LX_HFS_LOOP="$(sudo losetup -f --show "${img}")"
+    if ! sudo mount -t hfsplus -o rw,force "${_LX_HFS_LOOP}" "${_LX_HFS_MNT}"; then
+        sudo losetup -d "${_LX_HFS_LOOP}"; rmdir "${_LX_HFS_MNT}"
+        _LX_HFS_LOOP=""; _LX_HFS_MNT=""
+        die "HFS+ mount failed — install hfsprogs: apt install hfsprogs"
+    fi
+    echo "mounted HFS+ (read-write) on ${_LX_HFS_MNT}"
 }
 
 _linux_codesign_dir() {
-    # Ad-hoc sign every executable under $1 using ldid.
-    # ldid -S signs with null entitlements (equivalent to codesign -s -)
     local dir="${1}"
     sudo find "${dir}" -type f -perm /111 -exec sudo ldid -S {} \; 2>/dev/null || true
 }
 
 _linux_collect_hashes() {
-    # Walk $1 and print one CDHash per line for every signed executable.
-    # Uses get_cdhash.py (pure Python Mach-O parser, no codesign needed).
     local dir="${1}"
     sudo find "${dir}" -type f -perm /111 | while IFS= read -r f; do
         python3 "${GET_CDHASH}" "${f}" 2>/dev/null || true
@@ -259,7 +280,7 @@ patch_ramdisk() {
 
 _patch_ramdisk_darwin() {
     local ramdisk="${1}"
-    local livemount loopdev
+    local livemount
 
     echo "Patching ${ramdisk}"
 
@@ -320,33 +341,55 @@ _patch_ramdisk_darwin() {
 
 _patch_ramdisk_linux() {
     local ramdisk="${1}"
-    local livemount loopdev
+    local livemount new_ramdisk
+
+    trap '_linux_cleanup' EXIT
 
     echo "Patching ${ramdisk} (Linux)"
 
-    livemount="$(mktemp -d)"
-    loopdev="$(_linux_mount_dmg "${ramdisk}" "${livemount}")"
-    trap '_linux_umount_dmg "${livemount}" "${loopdev}"' EXIT
+    new_ramdisk="${FW_DIR}/ramdisk_new.img"
 
-    echo "mounted ${ramdisk} on ${livemount}"
+    if _detect_apfs "${ramdisk}"; then
+        # APFS ramdisk (iPhone 12+): linux-apfs-rw often forces read-only for
+        # newer iOS APFS features it doesn't know about. Strategy: mount the
+        # original APFS read-only, copy content to a new HFS+ image, modify there.
+        echo "APFS ramdisk detected — repacking as HFS+ for Linux write support"
+
+        _linux_mount_apfs_ro "${ramdisk}"
+        _linux_create_hfs_image "${ramdisk}" "${new_ramdisk}"
+
+        echo "Copying APFS content to HFS+ image..."
+        sudo cp -a "${_LX_APFS_MNT}/." "${_LX_HFS_MNT}/"
+
+        # Unmount APFS — no longer needed
+        sudo umount "${_LX_APFS_MNT}" 2>/dev/null || true
+        sudo losetup -d "${_LX_APFS_LOOP}" 2>/dev/null || true
+        rmdir "${_LX_APFS_MNT}" 2>/dev/null || true
+        _LX_APFS_MNT=""; _LX_APFS_LOOP=""
+
+        livemount="${_LX_HFS_MNT}"
+    else
+        # HFS+ ramdisk (older devices)
+        _linux_mount_hfs_rw "${ramdisk}"
+        livemount="${_LX_HFS_MNT}"
+    fi
+
+    echo "mounted ramdisk on ${livemount}"
 
     if [[ -d "${livemount}/System/Library/LaunchDaemons.old" ]]; then
         echo "already patched"
-        return
+    else
+        sudo mv "${livemount}/System/Library/LaunchDaemons" \
+                "${livemount}/System/Library/LaunchDaemons.old"
+        sudo mkdir "${livemount}/System/Library/LaunchDaemons"
+        sudo cp "${SHELL_LAUNCHD_PLIST}" "${livemount}/System/Library/LaunchDaemons"
     fi
-
-    sudo mv "${livemount}/System/Library/LaunchDaemons" \
-            "${livemount}/System/Library/LaunchDaemons.old"
-    sudo mkdir "${livemount}/System/Library/LaunchDaemons"
-    sudo cp "${SHELL_LAUNCHD_PLIST}" "${livemount}/System/Library/LaunchDaemons"
 
     case "${SYS_SDK}" in
         'iphoneos')
             if [[ ! -f "${IOS_SYSROOT_TARFILE}" ]]; then
-                echo "couldn't find the iOS sysroot"
-                exit 1
+                die "couldn't find the iOS sysroot (${IOS_SYSROOT_TARFILE})"
             fi
-
             echo "extracting iOS sysroot..."
             sudo tar xf "${IOS_SYSROOT_TARFILE}" --directory "${livemount}" --strip-components 1
             echo "signing binaries with ldid..."
@@ -362,6 +405,17 @@ _patch_ramdisk_linux() {
     echo "building trustcache..."
     _linux_collect_hashes "${livemount}" | sort -u > "${FW_DIR}/all_hashes"
     "${BUILD_TC}" "${FW_DIR}/all_hashes" "${FW_DIR}/ramdisk.tc"
+
+    # Flush and replace the original ramdisk
+    sudo umount "${_LX_HFS_MNT}" 2>/dev/null || true
+    sudo losetup -d "${_LX_HFS_LOOP}" 2>/dev/null || true
+    rmdir "${_LX_HFS_MNT}" 2>/dev/null || true
+    _LX_HFS_MNT=""; _LX_HFS_LOOP=""
+
+    if _detect_apfs "${ramdisk}"; then
+        mv "${new_ramdisk}" "${ramdisk}"
+        echo "replaced APFS ramdisk with HFS+ image"
+    fi
 }
 
 main() {
