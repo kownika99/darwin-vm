@@ -20,7 +20,12 @@ install_apt_deps() {
         make \
         libplist-dev \
         libssl-dev \
-        pkg-config
+        pkg-config \
+        linux-headers-"$(uname -r)" \
+        build-essential \
+        fuse3 \
+        libfuse3-dev \
+        zlib1g-dev
 }
 
 install_ldid() {
@@ -72,11 +77,35 @@ install_ipsw() {
     echo "    installed: $(ipsw version)"
 }
 
+install_apfs_rw() {
+    # linux-apfs-rw: read-write APFS kernel module (iOS 12+ ramdisks use APFS)
+    if grep -q "^apfs" /proc/filesystems 2>/dev/null; then
+        echo "==> apfs module already loaded"
+        return
+    fi
+    if sudo modprobe apfs 2>/dev/null; then
+        echo "==> apfs kernel module loaded"
+        return
+    fi
+
+    echo "==> Building linux-apfs-rw from source..."
+    local TMP_APFS
+    TMP_APFS="$(mktemp -d)"
+    trap 'rm -rf "${TMP_APFS}"' RETURN
+
+    git clone --depth=1 https://github.com/linux-apfs/linux-apfs-rw.git "${TMP_APFS}/apfs"
+    make -C "${TMP_APFS}/apfs" -j"$(nproc)"
+    sudo make -C "${TMP_APFS}/apfs" install
+    sudo depmod -a
+    sudo modprobe apfs
+    echo "    apfs module installed and loaded"
+}
+
 check_hfsplus_module() {
     echo "==> Checking HFS+ kernel module..."
     if ! grep -q hfsplus /proc/filesystems 2>/dev/null; then
         sudo modprobe hfsplus 2>/dev/null && echo "    hfsplus module loaded" \
-            || echo "    warning: could not load hfsplus — mount may fail at runtime"
+            || echo "    warning: hfsplus unavailable (only needed for pre-iPhone12 devices)"
     else
         echo "    hfsplus already available"
     fi
@@ -88,6 +117,7 @@ main() {
     install_apt_deps
     install_ldid
     install_ipsw
+    install_apfs_rw
     check_hfsplus_module
     echo ""
     echo "All dependencies installed."

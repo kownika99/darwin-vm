@@ -56,8 +56,29 @@ fixup_perms_linux() {
 
     loopdev="$(sudo losetup -f --show "${ramdisk}")"
 
-    if ! sudo mount -t hfsplus -o rw,force "${loopdev}" "${livemount}"; then
-        echo "mount failed — install hfsprogs: apt install hfsprogs"
+    # Detect APFS (magic NXSB at offset 0x20) vs HFS+
+    if python3 -c "
+import sys
+with open('${ramdisk}','rb') as f:
+    f.seek(0x20); magic=f.read(4)
+sys.exit(0 if magic == b'NXSB' else 1)
+" 2>/dev/null; then
+        FSTYPE="apfs"
+    else
+        FSTYPE="hfsplus"
+    fi
+
+    if [[ "${FSTYPE}" == "apfs" ]]; then
+        grep -q "^apfs" /proc/filesystems 2>/dev/null \
+            || sudo modprobe apfs 2>/dev/null \
+            || { echo "apfs module not available — run ./setup_linux.sh"; sudo losetup -d "${loopdev}"; rmdir "${livemount}"; exit 1; }
+        MOUNT_OPTS="-t apfs -o rw"
+    else
+        MOUNT_OPTS="-t hfsplus -o rw,force"
+    fi
+
+    if ! sudo mount ${MOUNT_OPTS} "${loopdev}" "${livemount}"; then
+        echo "mount failed (${FSTYPE})"
         sudo losetup -d "${loopdev}" 2>/dev/null || true
         rmdir "${livemount}"
         exit 1

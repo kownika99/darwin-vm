@@ -174,21 +174,54 @@ get_ramdisk() {
 
 # ── Linux-specific ramdisk helpers ──────────────────────────────────────────
 
-_linux_mount_hfs() {
+# Returns "apfs" or "hfsplus" based on the magic bytes in the image.
+_detect_fs_type() {
+    local img="${1}"
+    # APFS container superblock has magic "NXSB" at offset 0x20
+    if python3 -c "
+import sys
+with open('${img}','rb') as f:
+    f.seek(0x20); magic=f.read(4)
+sys.exit(0 if magic == b'NXSB' else 1)
+" 2>/dev/null; then
+        echo "apfs"
+    else
+        echo "hfsplus"
+    fi
+}
+
+_linux_mount_dmg() {
     local img="${1}" mnt="${2}"
-    local loopdev
+    local loopdev fstype
 
     loopdev="$(sudo losetup -f --show "${img}")"
     echo "${loopdev}"  # caller captures this
 
-    if ! sudo mount -t hfsplus -o rw,force "${loopdev}" "${mnt}"; then
-        sudo losetup -d "${loopdev}" 2>/dev/null || true
-        rmdir "${mnt}" 2>/dev/null || true
-        die "HFS+ mount failed — install hfsprogs: apt install hfsprogs"
-    fi
+    fstype="$(_detect_fs_type "${img}")"
+
+    case "${fstype}" in
+        apfs)
+            if ! grep -q "^apfs" /proc/filesystems 2>/dev/null; then
+                sudo modprobe apfs 2>/dev/null \
+                    || die "apfs kernel module not available — run ./setup_linux.sh first"
+            fi
+            if ! sudo mount -t apfs -o rw "${loopdev}" "${mnt}"; then
+                sudo losetup -d "${loopdev}" 2>/dev/null || true
+                rmdir "${mnt}" 2>/dev/null || true
+                die "APFS mount failed — run ./setup_linux.sh to install linux-apfs-rw"
+            fi
+            ;;
+        hfsplus)
+            if ! sudo mount -t hfsplus -o rw,force "${loopdev}" "${mnt}"; then
+                sudo losetup -d "${loopdev}" 2>/dev/null || true
+                rmdir "${mnt}" 2>/dev/null || true
+                die "HFS+ mount failed — install hfsprogs: apt install hfsprogs"
+            fi
+            ;;
+    esac
 }
 
-_linux_umount_hfs() {
+_linux_umount_dmg() {
     local mnt="${1}" loopdev="${2}"
     sudo umount "${mnt}"  2>/dev/null || true
     sudo losetup -d "${loopdev}" 2>/dev/null || true
@@ -292,8 +325,8 @@ _patch_ramdisk_linux() {
     echo "Patching ${ramdisk} (Linux)"
 
     livemount="$(mktemp -d)"
-    loopdev="$(_linux_mount_hfs "${ramdisk}" "${livemount}")"
-    trap '_linux_umount_hfs "${livemount}" "${loopdev}"' EXIT
+    loopdev="$(_linux_mount_dmg "${ramdisk}" "${livemount}")"
+    trap '_linux_umount_dmg "${livemount}" "${loopdev}"' EXIT
 
     echo "mounted ${ramdisk} on ${livemount}"
 
