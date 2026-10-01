@@ -14,9 +14,37 @@ install_apt_deps() {
     sudo apt-get install -y \
         jq \
         hfsprogs \
-        ldid \
         python3 \
-        kmod
+        kmod \
+        git \
+        make \
+        libplist-dev \
+        libssl-dev \
+        pkg-config
+}
+
+install_ldid() {
+    if command -v ldid &>/dev/null; then
+        echo "==> ldid already installed"
+        return
+    fi
+
+    # Try apt first (available on some distros)
+    if sudo apt-get install -y ldid 2>/dev/null; then
+        echo "==> ldid installed via apt"
+        return
+    fi
+
+    # Fall back to building from source (ProcursusTeam/ldid)
+    echo "==> ldid not in apt — building from source..."
+    local TMP_LDID
+    TMP_LDID="$(mktemp -d)"
+    trap 'rm -rf "${TMP_LDID}"' RETURN
+
+    git clone --depth=1 https://github.com/ProcursusTeam/ldid.git "${TMP_LDID}/ldid"
+    make -C "${TMP_LDID}/ldid" -j"$(nproc)"
+    sudo install -m755 "${TMP_LDID}/ldid/ldid" /usr/local/bin/ldid
+    echo "    installed: $(ldid 2>&1 | head -1 || true)"
 }
 
 install_ipsw() {
@@ -58,6 +86,7 @@ main() {
     echo "darwin-vm Linux dependency installer"
     echo ""
     install_apt_deps
+    install_ldid
     install_ipsw
     check_hfsplus_module
     echo ""
