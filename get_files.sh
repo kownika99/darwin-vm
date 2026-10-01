@@ -209,7 +209,9 @@ _linux_mount_apfs_ro() {
         sudo modprobe apfs 2>/dev/null \
             || die "apfs kernel module not available — run ./setup_linux.sh first"
     fi
-    if ! sudo mount -t apfs -o ro "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}"; then
+    # vol=0 selects the first (data) volume inside the APFS container.
+    # Without it, linux-apfs-rw mounts the container superblock, not the data.
+    if ! sudo mount -t apfs -o ro,vol=0 "${_LX_APFS_LOOP}" "${_LX_APFS_MNT}"; then
         sudo losetup -d "${_LX_APFS_LOOP}"; rmdir "${_LX_APFS_MNT}"
         _LX_APFS_LOOP=""; _LX_APFS_MNT=""
         die "APFS read-only mount failed — run ./setup_linux.sh to install linux-apfs-rw"
