@@ -1,0 +1,46 @@
+name: Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew install jq
+          IPSW_VER="v3.1.729"
+          curl -fsSL "https://github.com/blacktop/ipsw/releases/download/${IPSW_VER}/ipsw_${IPSW_VER#v}_macOS_arm64.tar.gz" -o /tmp/ipsw.tar.gz
+          tar -xzf /tmp/ipsw.tar.gz -C /tmp
+          sudo install -m755 /tmp/ipsw /usr/local/bin/ipsw
+
+      - name: Get sysroot
+        run: curl -fsSL https://raw.githubusercontent.com/jprx/ios-cli-tools/main/prebuilt.tar.gz -o ios_sysroot.tar.gz
+
+      - name: Find IPSW URL
+        run: |
+          URL=$(curl -s "https://api.ipsw.me/v4/device/iPhone14,2?type=ipsw" | python3 -c "
+import json,sys
+for fw in json.load(sys.stdin).get('firmwares',[]):
+    if fw.get('version','').startswith('26.6'):
+        print(fw['url']); break
+")
+          echo "IPSW_URL=${URL}" >> $GITHUB_ENV
+          echo "URL: ${URL}"
+
+      - name: Build
+        run: DEVNAME="iPhone14,2" URL="${IPSW_URL}" ./get_files.sh
+
+      - name: Fix perms
+        run: echo y | ./fix_perms.sh firmware/ramdisk.dmg
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: firmware/
+          retention-days: 7
