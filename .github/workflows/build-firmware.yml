@@ -7,10 +7,10 @@ on:
         description: 'Device name (e.g. iPhone14,2)'
         required: true
         default: 'iPhone14,2'
-      ipsw_url:
-        description: 'IPSW URL (leave blank to use default iOS 27)'
-        required: false
-        default: ''
+      ios_version:
+        description: 'iOS version (e.g. 26.6.1)'
+        required: true
+        default: '26.6.1'
 
 jobs:
   build:
@@ -24,22 +24,41 @@ jobs:
       - name: Install dependencies
         run: |
           brew install jq
-          # Install ipsw directly from GitHub releases to avoid untrusted tap issues
           IPSW_VER="v3.1.729"
           curl -fsSL "https://github.com/blacktop/ipsw/releases/download/${IPSW_VER}/ipsw_${IPSW_VER#v}_macOS_arm64.tar.gz" -o /tmp/ipsw.tar.gz
           tar -xzf /tmp/ipsw.tar.gz -C /tmp
           sudo install -m755 /tmp/ipsw /usr/local/bin/ipsw
           ipsw version
 
-      - name: Find IPSW URL (if not provided)
-        if: ${{ inputs.ipsw_url == '' }}
+      - name: Download iOS sysroot (prebuilt)
         run: |
-          URL=$(ipsw download ipsw --device "${{ inputs.devname }}" --version 26.6.1 --url-only 2>/dev/null | tail -1 || true)
-          echo "IPSW_URL=${URL}" >> $GITHUB_ENV
+          curl -fsSL "https://raw.githubusercontent.com/jprx/ios-cli-tools/main/prebuilt.tar.gz" \
+            -o ios_sysroot.tar.gz
+          echo "sysroot size: $(du -sh ios_sysroot.tar.gz)"
 
-      - name: Set IPSW URL from input
-        if: ${{ inputs.ipsw_url != '' }}
-        run: echo "IPSW_URL=${{ inputs.ipsw_url }}" >> $GITHUB_ENV
+      - name: Find IPSW URL
+        run: |
+          URL=$(ipsw download ipsw \
+            --device "${{ inputs.devname }}" \
+            --version "${{ inputs.ios_version }}" \
+            --urls 2>/dev/null | grep "https://" | head -1 | tr -d ' ' || true)
+          if [[ -z "$URL" ]]; then
+            # fallback: query ipsw.me API
+            URL=$(curl -s "https://api.ipsw.me/v4/device/${{ inputs.devname }}?type=ipsw" \
+              | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for fw in data.get('firmwares',[]):
+    if fw.get('version','').startswith('${{ inputs.ios_version }}'):
+        print(fw['url']); break
+" 2>/dev/null || true)
+          fi
+          if [[ -z "$URL" ]]; then
+            echo "ERROR: could not find IPSW URL for ${{ inputs.devname }} ${{ inputs.ios_version }}"
+            exit 1
+          fi
+          echo "Found URL: $URL"
+          echo "IPSW_URL=${URL}" >> $GITHUB_ENV
 
       - name: Build firmware
         run: |
@@ -52,7 +71,7 @@ jobs:
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: darwin-vm-firmware-${{ inputs.devname }}
+          name: darwin-vm-firmware-${{ inputs.devname }}-ios${{ inputs.ios_version }}
           path: |
             firmware/bootkc
             firmware/dtree
