@@ -1,0 +1,58 @@
+name: Build Darwin-VM Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      devname:
+        description: 'Device name (e.g. iPhone14,2)'
+        required: true
+        default: 'iPhone14,2'
+      ipsw_url:
+        description: 'IPSW URL (leave blank to use default iOS 27)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install jq
+          brew install blacktop/tap/ipsw
+
+      - name: Find IPSW URL (if not provided)
+        if: ${{ inputs.ipsw_url == '' }}
+        run: |
+          URL=$(ipsw download ipsw --device "${{ inputs.devname }}" --version 26.6.1 --url-only 2>/dev/null | tail -1 || true)
+          echo "IPSW_URL=${URL}" >> $GITHUB_ENV
+
+      - name: Set IPSW URL from input
+        if: ${{ inputs.ipsw_url != '' }}
+        run: echo "IPSW_URL=${{ inputs.ipsw_url }}" >> $GITHUB_ENV
+
+      - name: Build firmware
+        run: |
+          DEVNAME="${{ inputs.devname }}" URL="${IPSW_URL}" ./get_files.sh
+
+      - name: Fix permissions
+        run: |
+          echo y | ./fix_perms.sh firmware/ramdisk.dmg
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-vm-firmware-${{ inputs.devname }}
+          path: |
+            firmware/bootkc
+            firmware/dtree
+            firmware/sptm
+            firmware/txm
+            firmware/ramdisk.dmg
+            firmware/ramdisk.tc
+          retention-days: 7
